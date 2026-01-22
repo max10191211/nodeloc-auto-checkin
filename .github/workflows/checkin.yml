@@ -1,0 +1,55 @@
+
+name: NodeLoc Check-in
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'  # 每6小时运行一次
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nodeloc-checkin
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: docker build -t nodeloc-auto-checkin:latest .
+
+      - name: Run check-in (Docker)
+        env:
+          NODELOC_BASE_URL: ${{ secrets.NODELOC_BASE_URL }}
+          NL_COOKIE: ${{ secrets.NL_COOKIE }}
+          NODELOC_USERNAME: ${{ secrets.NODELOC_USERNAME }}
+          NODELOC_PASSWORD: ${{ secrets.NODELOC_PASSWORD }}
+          BROWSE_ENABLED: ${{ vars.BROWSE_ENABLED || 'true' }}
+          LIKE_PROB: ${{ vars.LIKE_PROB || '0.3' }}
+          CLICK_COUNT: ${{ vars.CLICK_COUNT || '10' }}
+          CHECKIN_SELECTOR: ${{ vars.CHECKIN_SELECTOR || '' }}
+          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
+          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
+          SC3_PUSH_KEY: ${{ secrets.SC3_PUSH_KEY }}
+        run: |
+          docker run --rm \
+            -e NODELOC_BASE_URL="$NODELOC_BASE_URL" \
+            -e NL_COOKIE="$NL_COOKIE" \
+            -e NODELOC_USERNAME="$NODELOC_USERNAME" \
+            -e NODELOC_PASSWORD="$NODELOC_PASSWORD" \
+            -e BROWSE_ENABLED="$BROWSE_ENABLED" \
+            -e LIKE_PROB="$LIKE_PROB" \
+            -e CLICK_COUNT="$CLICK_COUNT" \
+            -e CHECKIN_SELECTOR="$CHECKIN_SELECTOR" \
+            -e GOTIFY_URL="$GOTIFY_URL" \
+            -e GOTIFY_TOKEN="$GOTIFY_TOKEN" \
+            -e SC3_PUSH_KEY="$SC3_PUSH_KEY" \
+            nodeloc-auto-checkin:latest
