@@ -3,8 +3,51 @@ name: NodeLoc Check-in
 
 on:
   workflow_dispatch:
+    inputs:
+      nodeloc_base_url:
+        description: "可选：覆盖站点根地址（如 https://nodeloc.cc）"
+        required: false
+        default: ""
+      nl_cookie:
+        description: "可选：直接传 Cookie（优先于用户名密码）"
+        required: false
+        default: ""
+      username:
+        description: "可选：用户名（未提供 NL_COOKIE 时生效）"
+        required: false
+        default: ""
+      password:
+        description: "可选：密码（未提供 NL_COOKIE 时生效）"
+        required: false
+        default: ""
+      browse_enabled:
+        description: "是否执行随机浏览/点赞（true/false）"
+        required: false
+        default: "true"
+      like_prob:
+        description: "点赞概率 0~1"
+        required: false
+        default: "0.3"
+      click_count:
+        description: "随机浏览帖子数"
+        required: false
+        default: "10"
+      headless:
+        description: "Chromium 是否无头（true/false）。调试建议 false。"
+        required: false
+        default: "true"
+      checkin_selector:
+        description: "可选：覆盖签到按钮选择器"
+        required: false
+        default: "li.header-dropdown-toggle.checkin-icon button.checkin-button"
+      debug_artifacts:
+        description: "是否导出调试产物（debug_page.html / 浏览器日志等）"
+        required: false
+        default: "false"
+
   schedule:
-    - cron: '0 */12 * * *'  # 每6小时运行一次
+    # 每 12 小时运行一次（UTC）。北京时间 +8 相当于 8:00/14:00/20:00/次日2:00
+    - cron: "0 */12 * * *"
 
 permissions:
   contents: read
@@ -16,40 +59,94 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TZ: Asia/Shanghai
+      # 从仓库 Secrets 读取（优先级：workflow_dispatch 输入 > Secrets/Vars > 默认）
+      NODELOC_BASE_URL: ${{ github.event.inputs.nodeloc_base_url || secrets.NODELOC_BASE_URL || '' }}
+      NL_COOKIE:        ${{ github.event.inputs.nl_cookie       || secrets.NL_COOKIE        || '' }}
+      NODELOC_USERNAME: ${{ github.event.inputs.username        || secrets.NODELOC_USERNAME || '' }}
+      NODELOC_PASSWORD: ${{ github.event.inputs.password        || secrets.NODELOC_PASSWORD || '' }}
+      BROWSE_ENABLED:   ${{ github.event.inputs.browse_enabled  || vars.BROWSE_ENABLED      || 'true' }}
+      LIKE_PROB:        ${{ github.event.inputs.like_prob       || vars.LIKE_PROB           || '0.3' }}
+      CLICK_COUNT:      ${{ github.event.inputs.click_count     || vars.CLICK_COUNT         || '10' }}
+      HEADLESS:         ${{ github.event.inputs.headless        || vars.HEADLESS            || 'true' }}
+      CHECKIN_SELECTOR: ${{ github.event.inputs.checkin_selector|| vars.CHECKIN_SELECTOR    || 'li.header-dropdown-toggle.checkin-icon button.checkin-button' }}
+      GOTIFY_URL:       ${{ secrets.GOTIFY_URL }}
+      GOTIFY_TOKEN:     ${{ secrets.GOTIFY_TOKEN }}
+      SC3_PUSH_KEY:     ${{ secrets.SC3_PUSH_KEY }}
+      # 控制是否导出调试产物
+      DEBUG_ARTIFACTS:  ${{ github.event.inputs.debug_artifacts || 'false' }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up QEMU (for cross-arch builds, optional)
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image
-        run: docker build -t nodeloc-auto-checkin:latest .
+      - name: Build image (cache enabled)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: nodeloc-auto-checkin:latest
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Run check-in (Docker)
-        env:
-          NODELOC_BASE_URL: ${{ secrets.NODELOC_BASE_URL }}
-          NL_COOKIE: ${{ secrets.NL_COOKIE }}
-          NODELOC_USERNAME: ${{ secrets.NODELOC_USERNAME }}
-          NODELOC_PASSWORD: ${{ secrets.NODELOC_PASSWORD }}
-          BROWSE_ENABLED: ${{ vars.BROWSE_ENABLED || 'true' }}
-          LIKE_PROB: ${{ vars.LIKE_PROB || '0.3' }}
-          CLICK_COUNT: ${{ vars.CLICK_COUNT || '10' }}
-          CHECKIN_SELECTOR: ${{ vars.CHECKIN_SELECTOR || '' }}
-          GOTIFY_URL: ${{ secrets.GOTIFY_URL }}
-          GOTIFY_TOKEN: ${{ secrets.GOTIFY_TOKEN }}
-          SC3_PUSH_KEY: ${{ secrets.SC3_PUSH_KEY }}
+      - name: Run check-in in Docker
         run: |
-          docker run --rm \
-            -e NODELOC_BASE_URL="$NODELOC_BASE_URL" \
-            -e NL_COOKIE="$NL_COOKIE" \
-            -e NODELOC_USERNAME="$NODELOC_USERNAME" \
-            -e NODELOC_PASSWORD="$NODELOC_PASSWORD" \
-            -e BROWSE_ENABLED="$BROWSE_ENABLED" \
-            -e LIKE_PROB="$LIKE_PROB" \
-            -e CLICK_COUNT="$CLICK_COUNT" \
-            -e CHECKIN_SELECTOR="$CHECKIN_SELECTOR" \
-            -e GOTIFY_URL="$GOTIFY_URL" \
-            -e GOTIFY_TOKEN="$GOTIFY_TOKEN" \
-            -e SC3_PUSH_KEY="$SC3_PUSH_KEY" \
-            nodeloc-auto-checkin:latest
+          set -euo pipefail
+          container_name=nodeloc_run
+          docker rm -f "${container_name}" >/dev/null 2>&1 || true
+
+          # 运行容器（不加 --rm，便于随后 docker cp 导出调试文件）
+          docker run --name "${container_name}" \
+            -e NODELOC_BASE_URL="${NODELOC_BASE_URL}" \
+            -e NL_COOKIE="${NL_COOKIE}" \
+            -e NODELOC_USERNAME="${NODELOC_USERNAME}" \
+            -e NODELOC_PASSWORD="${NODELOC_PASSWORD}" \
+            -e BROWSE_ENABLED="${BROWSE_ENABLED}" \
+            -e LIKE_PROB="${LIKE_PROB}" \
+            -e CLICK_COUNT="${CLICK_COUNT}" \
+            -e HEADLESS="${HEADLESS}" \
+            -e CHECKIN_SELECTOR="${CHECKIN_SELECTOR}" \
+            -e GOTIFY_URL="${GOTIFY_URL}" \
+            -e GOTIFY_TOKEN="${GOTIFY_TOKEN}" \
+            -e SC3_PUSH_KEY="${SC3_PUSH_KEY}" \
+            -e TZ="${TZ}" \
+            nodeloc-auto-checkin:latest || true
+
+          # 导出调试产物（当 DEBUG_ARTIFACTS=true 时）
+          if [ "${DEBUG_ARTIFACTS}" = "true" ]; then
+            mkdir -p run_artifacts
+            # 页面快照（如果你的代码有写出 /app/debug_page.html）
+            docker cp "${container_name}:/app/debug_page.html" run_artifacts/debug_page.html 2>/dev/null || true
+            # 也尝试导出 DrissionPage 相关日志目录（若存在）
+            docker cp "${container_name}:/root/.config/DrissionPage" run_artifacts/DrissionPage 2>/dev/null || true
+          fi
+
+          # 读取容器退出码（成功/失败都继续，以便上传产物）
+          exit_code=$(docker inspect "${container_name}" --format='{{.State.ExitCode}}' || echo 1)
+          echo "container_exit_code=${exit_code}" >> $GITHUB_OUTPUT
+
+          # 结束容器
+          docker rm -f "${container_name}" >/dev/null 2>&1 || true
+
+      - name: Upload debug artifacts
+        if: ${{ env.DEBUG_ARTIFACTS == 'true' && hashFiles('run_artifacts/**') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+            name: debug-artifacts
+            path: run_artifacts
+
+      - name: Fail if container failed
+        run: |
+          echo "Exit code: ${{ steps.run_checkin.outputs.container_exit_code }}"
+          test "${{ steps.run_checkin.outputs.container_exit_code }}" -eq 0
+        shell: bash
+        id: run_checkin
