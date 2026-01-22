@@ -47,7 +47,7 @@ new Env("NodeLoc 签到")
 ## ⚙️ 环境变量
 | 变量名 | 必需 | 描述 |
 |---|---|---|
-| NODELOC_BASE_URL | 否 | 站点根域名，默认 https://www.nodeloc.com |
+| NODELOC_BASE_URL | 是 | 站点根域名，默认 https://www.nodeloc.com |
 | NL_COOKIE | 建议 | 整串 Cookie（优先） |
 | NODELOC_USERNAME | 否 | 用户名（未提供 NL_COOKIE 时与密码一起） |
 | NODELOC_PASSWORD | 否 | 密码 |
@@ -74,3 +74,4 @@ new Env("NodeLoc 签到")
 
 ## 📄 License
 MIT
+
