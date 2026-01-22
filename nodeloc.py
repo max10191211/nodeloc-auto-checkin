@@ -1,4 +1,5 @@
-﻿# -*- coding: utf-8 -*-
+
+# -*- coding: utf-8 -*-
 import os
 import re
 import time
@@ -13,6 +14,7 @@ from tabulate import tabulate
 
 from utils import retry
 
+# ------------------ 基础配置 ------------------
 BASE_URL = os.environ.get("NODELOC_BASE_URL", "https://www.nodeloc.com").rstrip("/")
 LOGIN_URL = f"{BASE_URL}/login"
 SESSION_URL = f"{BASE_URL}/session"
@@ -22,40 +24,53 @@ USERNAME = os.environ.get("NODELOC_USERNAME") or os.environ.get("USERNAME")
 PASSWORD = os.environ.get("NODELOC_PASSWORD") or os.environ.get("PASSWORD")
 NL_COOKIE = os.environ.get("NL_COOKIE", "").strip()
 
-BROWSE_ENABLED = os.environ.get("BROWSE_ENABLED", "true").strip().lower() not in ["false","0","off"]
-HEADLESS = os.environ.get("HEADLESS", "true").strip().lower() not in ["false","0","off"]
+BROWSE_ENABLED = os.environ.get("BROWSE_ENABLED", "true").strip().lower() not in ["false", "0", "off"]
+HEADLESS = os.environ.get("HEADLESS", "true").strip().lower() not in ["false", "0", "off"]
 LIKE_PROB = float(os.environ.get("LIKE_PROB", "0.3"))
 CLICK_COUNT = int(os.environ.get("CLICK_COUNT", "10"))
 
-# 默认签到按钮选择器（优先未签到按钮，再兜底任意签到按钮）
-DEFAULT_CHECKIN_SELECTORS = "button.checkin-button:not(.checked-in),button.checkin-button"
+# 默认签到按钮选择器（优先你给出的精准结构，其次兜底）
+DEFAULT_CHECKIN_SELECTORS = (
+    "li.header-dropdown-toggle.checkin-icon button.checkin-button,"
+    "button.checkin-button:not(.checked-in),"
+    "button.checkin-button"
+)
 CHECKIN_SELECTOR = os.environ.get("CHECKIN_SELECTOR", DEFAULT_CHECKIN_SELECTORS).strip()
-
-
 
 GOTIFY_URL = os.environ.get("GOTIFY_URL")
 GOTIFY_TOKEN = os.environ.get("GOTIFY_TOKEN")
 SC3_PUSH_KEY = os.environ.get("SC3_PUSH_KEY")
+# ------------------------------------------------
+
 
 class NodeLocBrowser:
     def __init__(self) -> None:
+        # HTTP 会话（curl_cffi）
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                           "Chrome/118.0.0.0 Safari/537.36"),
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/118.0.0.0 Safari/537.36"
+            ),
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Accept-Language": "zh-CN,zh;q=0.9",
         })
-        co = (ChromiumOptions()
-              .headless(HEADLESS)
-              .incognito(True)
-              .set_argument("--no-sandbox")
-              .set_argument("--disable-dev-shm-usage"))
+
+        # 可控浏览器（DrissionPage）
+        co = (
+            ChromiumOptions()
+            .headless(HEADLESS)
+            .incognito(True)
+            .set_argument("--no-sandbox")
+            .set_argument("--disable-dev-shm-usage")
+        )
         self.browser = Chromium(co)
         self.page = self.browser.new_tab()
 
+    # ------------------ Cookie & 登录 ------------------
     def set_cookies_to_both(self, cookie_dict: dict):
+        """同步 cookie 到 http 会话与浏览器"""
         for k, v in cookie_dict.items():
             self.session.cookies.set(k, v, domain=self._cookie_domain())
         dp_cookies = [{"name": k, "value": v, "domain": self._cookie_domain(), "path": "/"}
@@ -122,6 +137,7 @@ class NodeLocBrowser:
                 logger.error(f"登录失败: {j.get('error')}")
                 return False
 
+            # 同步 cookie
             self.set_cookies_to_both(self.session.cookies.get_dict())
             self.page.get(BASE_URL + "/")
             time.sleep(4)
@@ -131,74 +147,93 @@ class NodeLocBrowser:
             return False
 
     def _verify_logged_in(self) -> bool:
+        """通过页面结构粗略判断是否登录成功"""
         user_ele = self.page.ele("@id=current-user")
         if user_ele:
             logger.info("登录验证成功（current-user）")
             return True
-        if "avatar" in (self.page.html or "") or "/u/" in (self.page.html or ""):
+        html = self.page.html or ""
+        if "avatar" in html or "/u/" in html:
             logger.info("登录验证成功（avatar / /u/）")
             return True
         logger.error("登录验证失败")
         return False
+    # ----------------------------------------------------
 
-    
-    
-    
-    
+    # ------------------ 签到（最终版） ------------------
     def try_checkin(self) -> bool:
+        """点击顶部导航栏里的签到按钮：
+        <li class="header-dropdown-toggle checkin-icon">
+            <button class="checkin-button ... [checked-in]">...</button>
+        </li>
+        """
         logger.info("尝试执行签到...")
-    
+
         # 打开首页
         self.page.get(BASE_URL + "/")
         time.sleep(2)
-        selector = "li.header-dropdown-toggle.checkin-icon button.checkin-button"
-    
-        # 查找签到按钮
-        btn = self.page.ele(selector)
-        if not btn:
-            logger.warning(f"找不到签到按钮：{selector}")
-            return False
-    
-        # 判断是否已签到
-        cls = btn.attr("class") or ""
-        if "checked-in" in cls:
-            logger.success("今日已签到（按钮含 checked-in）")
-            return True
-    
-        # 执行签到点击
-        try:
-            btn.click()
+
+        # 精准按钮选择器（可被 env CHECKIN_SELECTOR 覆盖）
+        selectors = [s.strip() for s in CHECKIN_SELECTOR.split(",") if s.strip()]
+        # 确保第一位是你给出的精准路径
+        precise = "li.header-dropdown-toggle.checkin-icon button.checkin-button"
+        if precise not in selectors:
+            selectors.insert(0, precise)
+
+        logger.debug(f"签到按钮候选：{selectors}")
+
+        def _is_checked(ele) -> bool:
+            try:
+                cls = ele.attr("class") or ""
+                return "checked-in" in cls or bool(ele.attr("disabled"))
+            except Exception:
+                return False
+
+        for sel in selectors:
+            btn = self.page.ele(sel)
+            if not btn:
+                continue
+
+            # 已签到直接成功
+            if _is_checked(btn):
+                logger.success("今日已签到（按钮含 checked-in/disabled）")
+                return True
+
+            # 点击签到
+            try:
+                btn.click()
+            except Exception:
+                # 兜底：JS 点击
+                try:
+                    self.page.run_js("arguments[0].click();", btn)
+                except Exception as e:
+                    logger.debug(f"点击失败：{e}")
+                    continue
+
             time.sleep(2)
-        except Exception as e:
-            logger.error(f"签到按钮点击失败: {e}")
-            return False
-    
-        # 再次确认签到状态
-        try:
-            btn2 = self.page.ele(selector)
-            cls2 = btn2.attr("class") if btn2 else ""
-            if btn2 and "checked-in" in cls2:
+
+            # 二次确认
+            btn2 = self.page.ele(sel)
+            if btn2 and _is_checked(btn2):
                 logger.success("签到成功（按钮状态变为 checked-in）")
                 return True
-        except Exception:
-            pass
-    
-        logger.warning("尝试点击签到按钮后仍未检测到签到成功")
+
+        logger.warning("未找到签到按钮或点击后未确认到成功")
         return False
+    # ----------------------------------------------------
 
-
-
-    
-
-
+    # ------------------ 浏览/点赞（原逻辑） ------------------
     def click_topics_and_browse(self) -> bool:
         logger.info("开始随机浏览首页主题...")
         self.page.get(BASE_URL + "/")
         time.sleep(4)
+
+        # 兼容 DrissionPage：使用 css= 前缀（已有用法保持不变）
         topic_links = [a.attr("href") for a in self.page.eles("css=#list-area a.title") if a.attr("href")]
         if not topic_links:
             logger.error("未找到主题链接")
             return False
+
         picks = random.sample(topic_links, min(CLICK_COUNT, len(topic_links)))
         logger.info(f"发现 {len(topic_links)} 个主题，随机浏览 {len(picks)} 个")
         for url in picks:
@@ -246,7 +281,9 @@ class NodeLocBrowser:
                     return
         except Exception:
             pass
+    # ----------------------------------------------------
 
+    # ------------------ 信息/通知 ------------------
     def print_basic_info(self):
         try:
             resp = self.session.get(f"{BASE_URL}/badges", impersonate="chrome136")
@@ -270,6 +307,7 @@ class NodeLocBrowser:
         if browsed and BROWSE_ENABLED:
             status += " + 浏览任务完成"
 
+        # Gotify
         if GOTIFY_URL and GOTIFY_TOKEN:
             try:
                 r = requests.post(
@@ -282,6 +320,7 @@ class NodeLocBrowser:
             except Exception:
                 pass
 
+        # Server酱³
         if SC3_PUSH_KEY:
             m = re.match(r"sct(\d+)t", SC3_PUSH_KEY, re.I)
             if m:
@@ -295,12 +334,15 @@ class NodeLocBrowser:
                         break
                     except Exception:
                         time.sleep(random.randint(120, 240))
+    # ----------------------------------------------------
 
+    # ------------------ 入口 ------------------
     def run(self) -> bool:
         ok = False
         did_checkin = False
         browsed = False
         try:
+            # 登录优先级：Cookie -> 密码
             if NL_COOKIE:
                 ok = self.login_via_cookie()
                 if not ok and USERNAME and PASSWORD:
@@ -313,7 +355,11 @@ class NodeLocBrowser:
                 return False
 
             self.print_basic_info()
+
+            # 签到
             did_checkin = self.try_checkin()
+
+            # 浏览/点赞
             if BROWSE_ENABLED:
                 browsed = self.click_topics_and_browse()
 
@@ -325,17 +371,11 @@ class NodeLocBrowser:
                 self.browser.quit()
             except Exception:
                 pass
+    # ----------------------------------------------------
+
 
 class NodeLocRunner:
     def run(self) -> bool:
         b = NodeLocBrowser()
         return b.run()
-
-
-
-
-
-
-
-
 
