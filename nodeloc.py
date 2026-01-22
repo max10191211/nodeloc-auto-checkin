@@ -151,7 +151,7 @@ class NodeLocBrowser:
         # 打开首页
         self.page.get(BASE_URL + "/")
         time.sleep(2)
-        selector = "li.checkin-icon button"
+        selector = "li.header-dropdown-toggle.checkin-icon button.checkin-button"
     
         # 查找签到按钮
         btn = self.page.ele(selector)
@@ -330,6 +330,7 @@ class NodeLocRunner:
     def run(self) -> bool:
         b = NodeLocBrowser()
         return b.run()
+
 
 
 
