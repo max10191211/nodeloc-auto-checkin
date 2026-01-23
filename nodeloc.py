@@ -151,7 +151,7 @@ class NodeLocBrowser:
             return False
 
     def _verify_logged_in(self) -> bool:
-        user_ele = self.page.ele("@id=current-user")
+        user_ele = self.page.ele("css=@id=current-user") or self.page.ele("@id=current-user")
         if user_ele:
             logger.info("登录验证成功（current-user）")
             return True
@@ -163,61 +163,98 @@ class NodeLocBrowser:
         return False
     # ----------------------------------------------------
 
-    # ------------------ 签到（Desktop 版） ------------------
-    
+    # ------------------ 签到（Desktop 版 + whoami/cookies/server verify） ------------------
     def try_checkin(self) -> bool:
         logger.info("尝试执行签到...")
-    
+
         self.page.get(BASE_URL + "/")
         time.sleep(3)
-    
-        # 等待 Desktop 顶部导航栏渲染完成（注意：强制使用 css= 前缀）
+
+        # whoami（从 DOM 读取当前用户）
+        try:
+            me = self.page.ele("css=div.directory-table__row.me a[data-user-card]") \
+                 or self.page.ele("css=a[data-user-card]")
+            uname = me.attr("data-user-card") if me else ""
+            logger.info(f"[whoami] 当前页面用户：{uname or '未知'}  @ {BASE_URL}")
+        except Exception:
+            pass
+
+        # 打印浏览器内 Cookie（域/路径/关键名）
+        try:
+            cks = self.page.cookies(as_dict=False)  # list of dict
+            brief = []
+            for c in (cks or []):
+                domain = c.get("domain", "?")
+                path = c.get("path", "/")
+                name = c.get("name", "?")
+                val = (c.get("value", "") or "")[:12]
+                brief.append(f"{domain} {path} {name}={val}...")
+            if brief:
+                logger.debug("[cookies] " + " | ".join(brief))
+        except Exception:
+            pass
+
+        # 等待 Desktop 顶部导航栏渲染完成
         try:
             self.page.wait.ele_displayed("css=ul.icons.d-header-icons", timeout=10)
         except Exception:
             logger.warning("顶部导航栏未完全渲染，可能导致找不到签到按钮")
-    
-        # 你的精准按钮 + 更稳的备选（全部只放“选择器主干”，真正查找时统一加 css= 前缀）
+
+        # 精准按钮 + 更稳备选（统一用 css= 前缀）
         selectors = [
-            "li.header-dropdown-toggle.checkin-icon button.checkin-button",  # 你提供的 DOM
+            "li.header-dropdown-toggle.checkin-icon button.checkin-button",  # 你的 DOM
             "li.checkin-icon button.checkin-button",                         # 略宽松
-            'button.checkin-button[title*="签到"]',                          # 利用 title
-            'button.checkin-button[aria-label*="签到"]',                     # 利用 aria-label
+            'button.checkin-button[title*="签到"]',                          # 利用 title 文案
+            'button.checkin-button[aria-label*="签到"]',                     # 利用 aria-label 文案
         ]
-    
         # 允许通过环境变量覆盖/追加
         env_sel = [s.strip() for s in (CHECKIN_SELECTOR or "").split(",") if s.strip()]
         for s in env_sel:
             if s not in selectors:
                 selectors.append(s)
-    
+
         logger.debug(f"签到按钮候选（CSS）：{selectors}")
-    
+
         def _checked(ele) -> bool:
             """更稳的已签到判断：class 或 文案（title/aria-label）"""
             try:
                 cls = ele.attr("class") or ""
                 title = (ele.attr("title") or "") + " " + (ele.attr("aria-label") or "")
-                return "checked-in" in cls or ("已签" in title) or ("已签到" in title)
+                return ("checked-in" in cls) or ("已签" in title) or ("已签到" in title)
             except Exception:
                 return False
-    
+
+        def server_side_verify(session, base_url: str) -> str:
+            """服务端侧核验：抓 /u 与 /badges，确认登录用户与可访问性"""
+            try:
+                r1 = session.get(f"{base_url}/u", impersonate="chrome136", timeout=10)
+                hit_user = ""
+                if r1.status_code == 200:
+                    m = re.search(r'data-user-card="([^"]+)"', r1.text or "")
+                    hit_user = m.group(1) if m else ""
+                r2 = session.get(f"{base_url}/badges", impersonate="chrome136", timeout=10)
+                code2 = r2.status_code
+                return f"[server] user={hit_user or '未知'} /badges_code={code2}"
+            except Exception as e:
+                return f"[server] verify error: {e}"
+
         # 逐个候选尝试
         for sel in selectors:
             btn = None
             try:
-                btn = self.page.ele(f"css={sel}")   # ← 关键：统一加 css=
+                btn = self.page.ele(f"css={sel}")   # 关键：DrissionPage 使用 css= 前缀
             except Exception:
                 btn = None
-    
+
             if not btn:
                 logger.debug(f"未找到：{sel}")
                 continue
-    
+
             if _checked(btn):
                 logger.success("今日已签到（checked-in / 文案提示）")
+                logger.info(server_side_verify(self.session, BASE_URL))
                 return True
-    
+
             # 点击（失败则 JS 兜底）
             try:
                 btn.click()
@@ -227,35 +264,33 @@ class NodeLocBrowser:
                 except Exception as e:
                     logger.error(f"点击失败：{e}")
                     continue
-    
+
             time.sleep(2)
-    
+
             # 二次确认
             btn2 = self.page.ele(f"css={sel}")
             if btn2 and _checked(btn2):
                 logger.success("签到成功（状态/文案已更新）")
+                logger.info(server_side_verify(self.session, BASE_URL))
                 return True
-    
-        # 走到这里说明没找到；导出调试信息，方便你/我定位
+
+        # 走到这里：仍未确认成功 → 导出调试信息
         try:
-            # 导出完整 HTML
             with open("/app/debug_page.html", "w", encoding="utf-8") as f:
                 f.write(self.page.html or "")
-            # 尝试导出截图
             try:
                 self.page.save_screenshot("/app/snap.png")
             except Exception:
                 pass
-            # 同时把导航 icons 容器的 HTML 打出来
             icons = self.page.ele("css=ul.icons.d-header-icons")
             if icons:
                 logger.debug(f"[debug] header icons HTML: {icons.html}")
         except Exception:
             pass
-    
-        logger.warning("未找到签到按钮或未确认到成功（已导出 /app/debug_page.html 与 /app/snap.png，如可用）")
-        return False
 
+        logger.info(server_side_verify(self.session, BASE_URL))
+        logger.warning("未找到签到按钮或未确认到成功（已尝试导出 /app/debug_page.html 与 /app/snap.png）")
+        return False
     # ----------------------------------------------------
 
     # ------------------ 浏览/点赞 ------------------
@@ -297,13 +332,14 @@ class NodeLocBrowser:
             page.run_js(f"window.scrollBy(0, {dist})")
             time.sleep(random.uniform(1.8, 3.5))
 
-        # 简化滚动退出逻辑
             at_bottom = page.run_js("window.scrollY + window.innerHeight >= document.body.scrollHeight")
             cur = page.url
+
             if cur != prev_url:
                 prev_url = cur
             elif at_bottom and prev_url == cur:
                 break
+
             if random.random() < 0.07:
                 break
 
@@ -417,4 +453,3 @@ class NodeLocRunner:
     def run(self) -> bool:
         b = NodeLocBrowser()
         return b.run()
-
