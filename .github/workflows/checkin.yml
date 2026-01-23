@@ -97,6 +97,7 @@ jobs:
 
       - name: Run check-in in Docker
         id: run_checkin
+        shell: bash
         run: |
           set -euo pipefail
           container_name=nodeloc_run
@@ -121,6 +122,13 @@ jobs:
           rc=$?
           set -e
 
+          # 失败时打印容器日志，便于诊断
+          if [ "$rc" -ne 0 ]; then
+            echo "Container exited with code $rc. Showing logs:"
+            docker logs "${container_name}" || true
+          fi
+
+          # 按需导出调试产物
           if [ "${DEBUG_ARTIFACTS}" = "true" ]; then
             mkdir -p run_artifacts
             docker cp "${container_name}:/app/debug_page.html" run_artifacts/debug_page.html 2>/dev/null || true
@@ -129,17 +137,21 @@ jobs:
           fi
 
           docker rm -f "${container_name}" >/dev/null 2>&1 || true
+
+          # 正确写入步骤输出
           echo "exit_code=${rc}" >> "$GITHUB_OUTPUT"
 
       - name: Upload debug artifacts
-        if: ${{ env.DEBUG_ARTIFACTS == 'true' && hashFiles('run_artifacts/**') != '' }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-artifacts
           path: run_artifacts
+          if-no-files-found: ignore
 
       - name: Fail if container failed
         if: always()
+        shell: bash
         run: |
           exit_code='${{ steps.run_checkin.outputs.exit_code }}'
           if [ -z "${exit_code}" ]; then exit_code=1; fi
