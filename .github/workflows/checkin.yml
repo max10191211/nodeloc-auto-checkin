@@ -41,7 +41,7 @@ on:
         required: false
         default: "li.header-dropdown-toggle.checkin-icon button.checkin-button"
       debug_artifacts:
-        description: "是否导出调试产物（debug_page.html / 浏览器日志等）"
+        description: "是否导出调试产物（debug_page.html / snap.png / 浏览器日志）"
         required: false
         default: "false"
 
@@ -124,6 +124,7 @@ jobs:
           if [ "${DEBUG_ARTIFACTS}" = "true" ]; then
             mkdir -p run_artifacts
             docker cp "${container_name}:/app/debug_page.html" run_artifacts/debug_page.html 2>/dev/null || true
+            docker cp "${container_name}:/app/snap.png"        run_artifacts/snap.png        2>/dev/null || true
             docker cp "${container_name}:/root/.config/DrissionPage" run_artifacts/DrissionPage 2>/dev/null || true
           fi
 
