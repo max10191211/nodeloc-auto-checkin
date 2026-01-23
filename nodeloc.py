@@ -4,7 +4,7 @@ import os
 import re
 import time
 import random
-from typing import List, Optional
+from typing import Optional
 
 from loguru import logger
 from curl_cffi import requests
@@ -210,14 +210,26 @@ class NodeLocBrowser:
         # 服务器侧
         server_user = self._server_current_user()
 
-        # DOM 侧（首页当前用户菜单）
+        # DOM 侧（首页当前用户菜单 + JS 变量双保险）
+        dom_user = ""
         try:
             self.page.get(BASE_URL + "/")
-            time.sleep(1.2)
+            # 等待用户菜单渲染（最多 8s）
+            self.page.wait.ele_present("css=#current-user a[data-user-card]", timeout=8)
             dom_el = self.page.ele("css=#current-user a[data-user-card]")
             dom_user = dom_el.attr("data-user-card") if dom_el else ""
         except Exception:
             dom_user = ""
+
+        # 如果还是拿不到，尝试从全局 JS 变量读取（Discourse）
+        if not dom_user:
+            try:
+                dom_user = self.page.run_js(
+                    "return (window.Discourse && Discourse.User && Discourse.User.currentProp) "
+                    "? Discourse.User.currentProp('username') : '';"
+                )
+            except Exception:
+                pass
 
         logger.info(f"[{phase}] server current user = {server_user or '未知'}; dom current user = {dom_user or '未知'}")
 
@@ -308,13 +320,25 @@ class NodeLocBrowser:
         self.page.get(BASE_URL + "/")
         time.sleep(3)
 
-        # whoami（从 DOM 读取“当前登录用户”菜单）
+        # whoami（从 DOM 读取“当前登录用户”菜单 + JS 变量降级）
+        uname = ""
         try:
+            self.page.wait.ele_present("css=#current-user a[data-user-card]", timeout=8)
             me = self.page.ele("css=#current-user a[data-user-card]")
             uname = me.attr("data-user-card") if me else ""
-            logger.info(f"[whoami(dom)] 当前登录用户：{uname or '未知'}  @ {BASE_URL}")
         except Exception:
-            uname = ""
+            pass
+
+        if not uname:
+            try:
+                uname = self.page.run_js(
+                    "return (window.Discourse && Discourse.User && Discourse.User.currentProp) "
+                    "? Discourse.User.currentProp('username') : '';"
+                )
+            except Exception:
+                pass
+
+        logger.info(f"[whoami(dom)] 当前登录用户：{uname or '未知'}  @ {BASE_URL}")
 
         # 打印浏览器内 Cookie（域/路径/关键名）
         try:
@@ -625,4 +649,3 @@ class NodeLocRunner:
     def run(self) -> bool:
         b = NodeLocBrowser()
         return b.run()
-
