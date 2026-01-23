@@ -31,6 +31,7 @@ HEADLESS = os.environ.get("HEADLESS", "true").strip().lower() not in ["false", "
 HEADLESS_VARIANT = os.environ.get("HEADLESS_VARIANT", "new").strip().lower()
 LIKE_PROB = float(os.environ.get("LIKE_PROB", "0.3"))
 CLICK_COUNT = int(os.environ.get("CLICK_COUNT", "10"))
+DEBUG_ARTIFACTS = os.environ.get("DEBUG_ARTIFACTS", "false").strip().lower() == "true"
 
 # 默认签到按钮选择器：优先你提供的精准结构，其次兜底
 DEFAULT_CHECKIN_SELECTORS = (
@@ -110,6 +111,8 @@ def _make_chromium(headless: bool, headless_variant: str = "new") -> Chromium:
 
 class NodeLocBrowser:
     def __init__(self) -> None:
+        logger.info(f"Using BASE_URL: {BASE_URL}")
+
         # HTTP 会话（curl_cffi）
         self.session = requests.Session()
         self.session.headers.update({
@@ -154,6 +157,18 @@ class NodeLocBrowser:
         pairs = [kv.strip() for kv in cookie_str.split(";") if "=" in kv]
         return {kv.split("=", 1)[0].strip(): kv.split("=", 1)[1].strip() for kv in pairs}
 
+    def _server_current_user(self) -> str:
+        """服务端获取当前登录用户名（尽量不依赖前端），优先 /u 解析 data-user-card。"""
+        try:
+            r = self.session.get(f"{BASE_URL}/u", impersonate="chrome136", timeout=10)
+            if r.status_code == 200:
+                m = re.search(r'data-user-card="([^"]+)"', r.text or "")
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+        return ""
+
     def login_via_cookie(self) -> bool:
         logger.info("尝试使用 NL_COOKIE 登录...")
         try:
@@ -164,7 +179,11 @@ class NodeLocBrowser:
             self.set_cookies_to_both(cookie_dict)
             self.page.get(BASE_URL + "/")
             time.sleep(3)
-            return self._verify_logged_in()
+            ok = self._verify_logged_in()
+            if ok:
+                who = self._server_current_user()
+                logger.info(f"[after-login(cookie)] server current user = {who or '未知'}")
+            return ok
         except Exception as e:
             logger.error(f"Cookie 登录异常: {e}")
             return False
@@ -207,7 +226,10 @@ class NodeLocBrowser:
             self.set_cookies_to_both(self.session.cookies.get_dict())
             self.page.get(BASE_URL + "/")
             time.sleep(4)
-            return self._verify_logged_in()
+            ok = self._verify_logged_in()
+            who = self._server_current_user()
+            logger.info(f"[after-login(password)] server current user = {who or '未知'}")
+            return ok
         except Exception as e:
             logger.error(f"密码登录异常: {e}")
             return False
@@ -315,7 +337,25 @@ class NodeLocBrowser:
 
             if _checked(btn):
                 logger.success("今日已签到（checked-in / 文案提示）")
+                # --------- 增强校验：服务端 + UI 双确认 ----------
                 logger.info(server_side_verify(self.session, BASE_URL))
+                who2 = self._server_current_user()
+                logger.info(f"[after-checkin] server current user = {who2 or '未知'}")
+
+                # 刷新首页再次确认按钮状态
+                self.page.get(BASE_URL + "/")
+                time.sleep(2)
+                final_btn = self.page.ele("css=li.checkin-icon button.checkin-button") \
+                            or self.page.ele("css=button.checkin-button")
+                if final_btn:
+                    final_cls = final_btn.attr("class") or ""
+                    logger.info(f"[final-ui] checkin-button classes: {final_cls}")
+                if DEBUG_ARTIFACTS:
+                    try:
+                        self.page.save_screenshot("/app/snap_after.png")
+                    except Exception:
+                        pass
+                # ----------------------------------------------
                 return True
 
             # 点击（失败则 JS 兜底）
@@ -334,7 +374,24 @@ class NodeLocBrowser:
             btn2 = self.page.ele(f"css={sel}")
             if btn2 and _checked(btn2):
                 logger.success("签到成功（状态/文案已更新）")
+                # --------- 增强校验：服务端 + UI 双确认 ----------
                 logger.info(server_side_verify(self.session, BASE_URL))
+                who2 = self._server_current_user()
+                logger.info(f"[after-checkin] server current user = {who2 or '未知'}")
+
+                self.page.get(BASE_URL + "/")
+                time.sleep(2)
+                final_btn = self.page.ele("css=li.checkin-icon button.checkin-button") \
+                            or self.page.ele("css=button.checkin-button")
+                if final_btn:
+                    final_cls = final_btn.attr("class") or ""
+                    logger.info(f"[final-ui] checkin-button classes: {final_cls}")
+                if DEBUG_ARTIFACTS:
+                    try:
+                        self.page.save_screenshot("/app/snap_after.png")
+                    except Exception:
+                        pass
+                # ----------------------------------------------
                 return True
 
         # 走到这里：仍未确认成功 → 导出调试信息
